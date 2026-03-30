@@ -18,3 +18,13 @@ Terminal 2 (Frontend):
 
 # Environment doesn't matter here, but keep it simple
 npm run dev
+
+
+t2
+cd "C:\Users\Lugan\OneDrive\Área de Trabalho\ada_v2-main"
+& ".\.venv\Scripts\Activate.ps1"
+python backend/server.py
+
+
+t1
+npm run dev

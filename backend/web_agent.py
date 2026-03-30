@@ -310,9 +310,17 @@ class WebAgent:
                 response_parts = [types.Part(function_response=fr) for fr in function_responses]
                 chat_history.append(types.Content(role="user", parts=response_parts))
 
+            # Get final URL before closing browser
+            final_url = self.page.url if self.page else "about:blank"
+            
             await self.browser.close()
             print("[CLOSE] Browser closed.")
-            return final_response
+            
+            # Return both response text and the final URL
+            return {
+                "response": final_response,
+                "url": final_url
+            }
 
 if __name__ == "__main__":
     agent = WebAgent()

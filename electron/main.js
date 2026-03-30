@@ -2,11 +2,15 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 
-// Use ANGLE D3D11 backend - more stable on Windows while keeping WebGL working
-// This fixes "GPU state invalid after WaitForGetOffsetInRange" error
+// Use ANGLE D3D11 backend and disable GPU/GL features for Windows stability.
+// Isso é crucial quando Electron falha com código 3221225786 por driver GPU.
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('disable-software-rasterizer');
+app.commandLine.appendSwitch('disable-features', 'Vulkan,WebGL2,WebGL2ComputeContext,SkiaRenderer');
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('ignore-gpu-blacklist');
 app.commandLine.appendSwitch('use-angle', 'd3d11');
-app.commandLine.appendSwitch('enable-features', 'Vulkan');
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
 let mainWindow;
 let pythonProcess;
@@ -28,10 +32,10 @@ function createWindow() {
     // In dev, load Vite server. In prod, load index.html
     const isDev = process.env.NODE_ENV !== 'production';
 
-    const loadFrontend = (retries = 3) => {
+    const loadFrontend = (retries = 5) => {
         const url = isDev ? 'http://localhost:5173' : null;
         const loadPromise = isDev
-            ? mainWindow.loadURL(url)
+            ? mainWindow.loadURL(url, { extraHeaders: 'Cache-Control: no-cache' })
             : mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
 
         loadPromise
@@ -49,9 +53,10 @@ function createWindow() {
                     console.log(`Retrying in 1 second... (${retries} retries left)`);
                     setTimeout(() => loadFrontend(retries - 1), 1000);
                 } else {
-                    console.error('Failed to load frontend after all retries. Keeping window open.');
+                    console.error('Failed to load frontend after all retries. Showing error view.');
+                    mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<h1>Erro ao carregar frontend</h1><p>Verifique http://localhost:5173</p>'));
                     windowWasShown = true;
-                    mainWindow.show(); // Show anyway so user sees something
+                    mainWindow.show();
                 }
             });
     };

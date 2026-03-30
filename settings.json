@@ -1,8 +1,8 @@
 {
     "face_auth_enabled": false,
     "tool_permissions": {
-        "generate_cad": true,
-        "run_web_agent": true,
+        "generate_cad": false,
+        "run_web_agent": false,
         "write_file": true,
         "read_directory": true,
         "read_file": true,

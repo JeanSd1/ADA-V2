@@ -52,11 +52,11 @@ generate_cad = {
 
 run_web_agent = {
     "name": "run_web_agent",
-    "description": "Opens a web browser and performs a task according to the prompt.",
+    "description": "Opens a web browser with Google search results. ALWAYS use this tool when user asks to search, find, look up, or pesquisa anything on the internet. This opens the user's web browser (Chrome, Edge, Firefox) with the search results. Use this for: 'search X', 'find X', 'pesquisa sobre X', 'look up X', 'show me X on google', etc.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "prompt": {"type": "STRING", "description": "The detailed instructions for the web browser agent."}
+            "prompt": {"type": "STRING", "description": "The search query or topic to search for on Google. Examples: 'carros elétricos', 'python tutorial', 'weather today'"}
         },
         "required": ["prompt"]
     },
@@ -192,7 +192,16 @@ config = types.LiveConnectConfig(
         "You have a witty and charming personality. "
         "Your creator is Naz, and you address him as 'Sir'. "
         "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
-        "You have a fun personality.",
+        "You have a fun personality. "
+        "CRITICAL INSTRUCTIONS FOR TOOL USAGE: "
+        "- IF USER SAYS ANY WORD LIKE: pesquisa, procura, busca, search, find, look up, research, mostra, quero ver, me mostra"
+        "- THEN: IMMEDIATELY USE 'run_web_agent' TOOL. DO NOT SPEAK. DO NOT RESPOND WITH TEXT. JUST USE THE TOOL."
+        "- IF USER SAYS ANY WORD LIKE: abre, abre o, open, launch, start + APP NAME"
+        "- THEN: IMMEDIATELY USE 'open_application' TOOL. DO NOT SPEAK. DO NOT RESPOND WITH TEXT. JUST USE THE TOOL."
+        "- IF USER SAYS ANY WORD LIKE: execute, run, executa + COMMAND"
+        "- THEN: IMMEDIATELY USE 'execute_command' TOOL. DO NOT SPEAK. DO NOT RESPOND WITH TEXT. JUST USE THE TOOL."
+        "- REMEMBER: When user asks you to do something on their computer, you MUST use tools. You have FULL CONTROL of their Windows computer."
+        "- NEVER say 'I will search for that' or 'Let me open that for you' - INSTEAD, immediately use the tool.",
     tools=tools,
     speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
@@ -621,21 +630,286 @@ class AudioLoop:
              print(f"[ADA DEBUG] [ERR] Failed to send fs result: {e}")
 
     async def handle_web_agent_request(self, prompt):
-        print(f"[ADA DEBUG] [WEB] Web Agent Task: '{prompt}'")
+        """Handle web search by opening Google directly in user's default browser"""
+        print(f"[ADA DEBUG] [WEB] 🌐 🌟 WEB AGENT STARTED: '{prompt}' 🌟")
         
-        async def update_frontend(image_b64, log_text):
-            if self.on_web_data:
-                 self.on_web_data({"image": image_b64, "log": log_text})
-                 
-        # Run the web agent and wait for it to return
-        result = await self.web_agent.run_task(prompt, update_callback=update_frontend)
-        print(f"[ADA DEBUG] [WEB] Web Agent Task Returned: {result}")
-        
-        # Send the final result back to the main model
         try:
-             await self.session.send(input=f"System Notification: Web Agent has finished.\nResult: {result}", end_of_turn=True)
+            import urllib.parse
+            import subprocess
+            import os
+            
+            # Extract search query from prompt
+            search_query = prompt.replace("pesquisa sobre ", "").replace("search for ", "").replace("procura ", "").replace("mostra ", "").replace("show ", "").strip()
+            
+            # Build Google search URL
+            search_url = f"https://www.google.com/search?q={urllib.parse.quote(search_query)}"
+            
+            print(f"[ADA DEBUG] [WEB] 🔗 🔍 OPENING GOOGLE SEARCH: {search_url}")
+            
+            # Try multiple methods to open browser (Windows is unpredictable)
+            opened = False
+            
+            # Method 1: Windows START command via PowerShell (most reliable)
+            try:
+                print(f"[ADA DEBUG] [WEB] ⚡ ATTEMPTING PowerShell method...")
+                result = subprocess.run(
+                    ['powershell', '-NoProfile', '-Command', f'Start-Process "{search_url}"'],
+                    capture_output=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    print(f"[ADA DEBUG] [WEB] ✅ ✅ PowerShell SUCCESS - BROWSER OPENED!")
+                    opened = True
+            except Exception as e:
+                print(f"[ADA DEBUG] [WEB] ❌ PowerShell failed: {e}")
+            
+            # Method 2: Direct Windows start command
+            if not opened:
+                try:
+                    print(f"[ADA DEBUG] [WEB] 🪟 ATTEMPTING CMD start method...")
+                    os.system(f'start "" "{search_url}"')
+                    print(f"[ADA DEBUG] [WEB] ✅ ✅ CMD method executed - BROWSER SHOULD BE OPEN!")
+                    opened = True
+                except Exception as e:
+                    print(f"[ADA DEBUG] [WEB] ❌ CMD failed: {e}")
+            
+            # Method 3: Python webbrowser fallback
+            if not opened:
+                try:
+                    print(f"[ADA DEBUG] [WEB] 🐍 ATTEMPTING webbrowser fallback...")
+                    import webbrowser
+                    webbrowser.open(search_url)
+                    print(f"[ADA DEBUG] [WEB] ✅ ✅ Webbrowser opened - BROWSER OPEN!")
+                    opened = True
+                except Exception as e:
+                    print(f"[ADA DEBUG] [WEB] ❌ Webbrowser failed: {e}")
+            
+            if opened:
+                result_msg = f"Abri a pesquisa sobre '{search_query}' no seu navegador! Você pode ver todos os resultados do Google agora."
+                print(f"[ADA DEBUG] [WEB] ✨ 🎉 BROWSER SUCCESSFULLY OPENED!")
+            else:
+                result_msg = f"Tentei abrir a pesquisa, mas houve um problema. Procure por '{search_query}' no Google manualmente."
+                print(f"[ADA DEBUG] [WEB] ❌ 💥 ALL METHODS FAILED!")
+            
         except Exception as e:
-             print(f"[ADA DEBUG] [ERR] Failed to send web agent result to model: {e}")
+            result_msg = f"Falha ao abrir pesquisa no navegador: {str(e)}"
+            print(f"[ADA DEBUG] [WEB] ❌ 💥 CRITICAL ERROR: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send web result: {e}")
+
+    async def handle_execute_command(self, command):
+        print(f"[ADA DEBUG] [CMD] Executing: '{command}'")
+        try:
+            import subprocess
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            output = result.stdout + result.stderr if result.returncode != 0 else result.stdout
+            result_msg = f"Command executed successfully.\nOutput:\n{output}"
+            print(f"[ADA DEBUG] [CMD] Result: {result_msg}")
+        except asyncio.TimeoutError:
+            result_msg = f"Command timed out after 30 seconds."
+            print(f"[ADA DEBUG] [CMD] Timeout: {result_msg}")
+        except Exception as e:
+            result_msg = f"Failed to execute command: {str(e)}"
+            print(f"[ADA DEBUG] [CMD] Error: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send command result: {e}")
+
+    async def handle_open_application(self, app_path, arguments=""):
+        print(f"[ADA DEBUG] [APP] Opening: '{app_path}' with args: '{arguments}'")
+        try:
+            import subprocess
+            
+            # Handle common application names
+            app_path_lower = app_path.lower()
+            if app_path_lower in ["chrome", "google chrome"]:
+                app_path = "chrome"
+            elif app_path_lower in ["edge", "microsoft edge"]:
+                app_path = "msedge"
+            elif app_path_lower in ["firefox"]:
+                app_path = "firefox"
+            elif app_path_lower in ["notepad"]:
+                app_path = "notepad"
+            elif app_path_lower in ["explorer", "file explorer"]:
+                app_path = "explorer"
+            
+            # Build command
+            if arguments:
+                cmd = f'start "" "{app_path}" {arguments}'
+            else:
+                cmd = f'start "" "{app_path}"'
+            
+            print(f"[ADA DEBUG] [APP] Executing: {cmd}")
+            
+            # Use subprocess to run the command
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                result_msg = f"Aplicação '{app_path}' aberta com sucesso!"
+                print(f"[ADA DEBUG] [APP] ✅ Success: {result_msg}")
+            else:
+                result_msg = f"Aplicação '{app_path}' pode ter sido aberta, mas houve uma saída não-zero: {result.stderr}"
+                print(f"[ADA DEBUG] [APP] ⚠️ Warning: {result_msg}")
+                
+        except subprocess.TimeoutExpired:
+            result_msg = f"Aplicação '{app_path}' iniciou, mas demorou mais de 10 segundos para responder."
+            print(f"[ADA DEBUG] [APP] ⏰ Timeout: {result_msg}")
+        except Exception as e:
+            result_msg = f"Falha ao abrir aplicação '{app_path}': {str(e)}"
+            print(f"[ADA DEBUG] [APP] ❌ Error: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send app result: {e}")
+
+    async def handle_delete_file(self, path):
+        print(f"[ADA DEBUG] [FS] Deleting file: '{path}'")
+        try:
+            if not os.path.exists(path):
+                result_msg = f"File '{path}' does not exist."
+            elif os.path.isdir(path):
+                result_msg = f"Path '{path}' is a directory, not a file. Use delete_directory tool instead."
+            else:
+                os.remove(path)
+                result_msg = f"File '{path}' deleted successfully."
+            print(f"[ADA DEBUG] [FS] Result: {result_msg}")
+        except Exception as e:
+            result_msg = f"Failed to delete file '{path}': {str(e)}"
+            print(f"[ADA DEBUG] [FS] Error: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send delete result: {e}")
+
+    async def handle_delete_directory(self, path):
+        print(f"[ADA DEBUG] [FS] Deleting directory: '{path}'")
+        try:
+            import shutil
+            if not os.path.exists(path):
+                result_msg = f"Directory '{path}' does not exist."
+            elif not os.path.isdir(path):
+                result_msg = f"Path '{path}' is a file, not a directory. Use delete_file tool instead."
+            else:
+                shutil.rmtree(path)
+                result_msg = f"Directory '{path}' and all contents deleted successfully."
+            print(f"[ADA DEBUG] [FS] Result: {result_msg}")
+        except Exception as e:
+            result_msg = f"Failed to delete directory '{path}': {str(e)}"
+            print(f"[ADA DEBUG] [FS] Error: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send delete result: {e}")
+
+    async def handle_copy_file(self, source, destination):
+        print(f"[ADA DEBUG] [FS] Copying '{source}' to '{destination}'")
+        try:
+            import shutil
+            if not os.path.exists(source):
+                result_msg = f"Source file '{source}' does not exist."
+            elif os.path.isdir(source):
+                result_msg = f"Source '{source}' is a directory. Use system tools for directory copy."
+            else:
+                # Create destination directory if it doesn't exist
+                dest_dir = os.path.dirname(destination)
+                if dest_dir and not os.path.exists(dest_dir):
+                    os.makedirs(dest_dir, exist_ok=True)
+                
+                shutil.copy2(source, destination)
+                result_msg = f"File copied from '{source}' to '{destination}' successfully."
+            print(f"[ADA DEBUG] [FS] Result: {result_msg}")
+        except Exception as e:
+            result_msg = f"Failed to copy file: {str(e)}"
+            print(f"[ADA DEBUG] [FS] Error: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send copy result: {e}")
+
+    async def handle_get_system_info(self, info_type):
+        print(f"[ADA DEBUG] [SYS] Getting system info: '{info_type}'")
+        try:
+            import subprocess
+            import platform
+            
+            if info_type == "processes":
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    "Get-Process | Select-Object Name, ProcessName, Handles | Format-Table -AutoSize",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                info = result.stdout
+            elif info_type == "drives":
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    "Get-PSDrive -PSProvider FileSystem",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                info = result.stdout
+            elif info_type == "environment":
+                info = f"OS: {platform.system()} {platform.release()}\n"
+                info += f"Python: {platform.python_version()}\n"
+                info += f"Processor: {platform.processor()}\n"
+            elif info_type == "network":
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    "ipconfig",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                info = result.stdout
+            elif info_type == "users":
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    "whoami && net user",
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                info = result.stdout
+            elif info_type == "os":
+                info = f"OS: {platform.system()} {platform.release()}\n"
+                info += f"Version: {platform.version()}\n"
+                info += f"Machine: {platform.machine()}\n"
+                info += f"Node: {platform.node()}\n"
+            else:
+                info = f"Unknown info type: {info_type}. Supported types: processes, drives, environment, network, users, os"
+            
+            result_msg = f"System Information ({info_type}):\n{info[:2000]}"  # Limit output
+            print(f"[ADA DEBUG] [SYS] Result: {result_msg}")
+        except Exception as e:
+            result_msg = f"Failed to get system info: {str(e)}"
+            print(f"[ADA DEBUG] [SYS] Error: {result_msg}")
+        
+        try:
+            await self.session.send(input=f"System Notification: {result_msg}", end_of_turn=True)
+        except Exception as e:
+            print(f"[ADA DEBUG] [ERR] Failed to send system info: {e}")
 
     async def receive_audio(self):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
@@ -643,9 +917,12 @@ class AudioLoop:
             while True:
                 turn = self.session.receive()
                 async for response in turn:
-                    # 1. Handle Audio Data
+                    # 1. Handle Audio Data - SEND TO FRONTEND (response audio only)
                     if data := response.data:
                         self.audio_in_queue.put_nowait(data)
+                        # Send response audio to frontend only (not mic input)
+                        if self.on_audio_data:
+                            self.on_audio_data(data)
                         # NOTE: 'continue' removed here to allow processing transcription/tools in same packet
 
                     # 2. Handle Transcription (User & Model)
@@ -787,7 +1064,8 @@ class AudioLoop:
                                     # No function response needed - model already acknowledged when user asked
                                 
                                 elif fc.name == "run_web_agent":
-                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'run_web_agent' with prompt='{prompt}'")
+                                    print(f"[ADA DEBUG] [TOOL] 🔍 TOOL CALLED: 'run_web_agent' with prompt='{prompt}'")
+                                    print(f"[ADA DEBUG] [TOOL] 🚀 STARTING WEB SEARCH TASK...")
                                     asyncio.create_task(self.handle_web_agent_request(prompt))
                                     
                                     result_text = "Web Navigation started. Do not reply to this message."
@@ -798,7 +1076,7 @@ class AudioLoop:
                                             "result": result_text,
                                         }
                                     )
-                                    print(f"[ADA DEBUG] [RESPONSE] Sending function response: {function_response}")
+                                    print(f"[ADA DEBUG] [RESPONSE] ✅ Sending function response: {function_response}")
                                     function_responses.append(function_response)
 
 
@@ -828,6 +1106,62 @@ class AudioLoop:
                                     asyncio.create_task(self.handle_read_file(path))
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": "Reading file..."}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "execute_command":
+                                    command = fc.args["command"]
+                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'execute_command' command='{command}'")
+                                    asyncio.create_task(self.handle_execute_command(command))
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": "Executing command..."}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "open_application":
+                                    app_path = fc.args["app_path"]
+                                    arguments = fc.args.get("arguments", "")
+                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'open_application' app='{app_path}' args='{arguments}'")
+                                    asyncio.create_task(self.handle_open_application(app_path, arguments))
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": f"Opening {app_path}..."}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "delete_file":
+                                    path = fc.args["path"]
+                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'delete_file' path='{path}'")
+                                    asyncio.create_task(self.handle_delete_file(path))
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": "Deleting file..."}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "delete_directory":
+                                    path = fc.args["path"]
+                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'delete_directory' path='{path}'")
+                                    asyncio.create_task(self.handle_delete_directory(path))
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": "Deleting directory..."}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "copy_file":
+                                    source = fc.args["source"]
+                                    destination = fc.args["destination"]
+                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'copy_file' from='{source}' to='{destination}'")
+                                    asyncio.create_task(self.handle_copy_file(source, destination))
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": "Copying file..."}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "get_system_info":
+                                    info_type = fc.args["info_type"]
+                                    print(f"[ADA DEBUG] [TOOL] Tool Call: 'get_system_info' type='{info_type}'")
+                                    asyncio.create_task(self.handle_get_system_info(info_type))
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": "Fetching system info..."}
                                     )
                                     function_responses.append(function_response)
 
@@ -1124,19 +1458,31 @@ class AudioLoop:
             raise e
 
     async def play_audio(self):
-        stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RECEIVE_SAMPLE_RATE,
-            output=True,
-            output_device_index=self.output_device_index,
-        )
+        # Local pyaudio output is optional. Disable in environment to avoid duplicate audio
+        # when the same machine is also receiving and playing audio in the browser.
+        local_output = os.getenv('ADA_LOCAL_AUDIO_OUTPUT', 'false').lower() in ['1', 'true', 'yes']
+
+        stream = None
+        if local_output:
+            stream = await asyncio.to_thread(
+                pya.open,
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=RECEIVE_SAMPLE_RATE,
+                output=True,
+                output_device_index=self.output_device_index,
+            )
+            print('[ADA DEBUG] Local audio output enabled (pyaudio)')
+        else:
+            print('[ADA DEBUG] Local audio output disabled; using browser audio path only')
+
         while True:
             bytestream = await self.audio_in_queue.get()
-            if self.on_audio_data:
-                self.on_audio_data(bytestream)
-            await asyncio.to_thread(stream.write, bytestream)
+            # NOTE: on_audio_data callback removed from here.
+            # Audio is now sent to frontend only from receive_audio() (response audio)
+            # This prevents sending microphone audio back to frontend (which caused feedback)
+            if local_output and stream:
+                await asyncio.to_thread(stream.write, bytestream)
 
     async def get_frames(self):
         cap = await asyncio.to_thread(cv2.VideoCapture, 0, cv2.CAP_AVFOUNDATION)

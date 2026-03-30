@@ -4,11 +4,12 @@ import io from 'socket.io-client';
 import Visualizer from './components/Visualizer';
 import TopAudioBar from './components/TopAudioBar';
 import CadWindow from './components/CadWindow';
-import BrowserWindow from './components/BrowserWindow';
+// import BrowserWindow from './components/BrowserWindow'; // DISABLED - Web search opens directly in browser now
 import ChatModule from './components/ChatModule';
 import ToolsModule from './components/ToolsModule';
 import { Mic, MicOff, Settings, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock } from 'lucide-react';
-import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+import { FilesetResolver } from '@mediapipe/tasks-vision';
+// import { HandLandmarker } from '@mediapipe/tasks-vision'; // DISABLED - Hand tracking disabled
 // MemoryPrompt removed - memory is now actively saved to project
 import ConfirmationPopup from './components/ConfirmationPopup';
 import AuthLock from './components/AuthLock';
@@ -18,29 +19,41 @@ import SettingsWindow from './components/SettingsWindow';
 
 
 
-const socket = io('http://localhost:8000');
-const { ipcRenderer } = window.require('electron');
+const socket = io('http://127.0.0.1:8000', {
+    autoConnect: false,
+    transports: ['websocket', 'polling'],
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    timeout: 20000
+});
+
+// Open socket explicitly after configuration
+if (typeof window !== 'undefined') {
+    socket.open();
+}
+
+const { ipcRenderer } = (typeof window !== 'undefined' && window.require) ? window.require('electron') : { ipcRenderer: { send: () => {}, on: () => {} } };
 
 function App() {
     const [status, setStatus] = useState('Disconnected');
     const [socketConnected, setSocketConnected] = useState(socket.connected); // Track socket connection reactively
     // Auth State
     const [isAuthenticated, setIsAuthenticated] = useState(() => {
-        // Optimistically assume authenticated if face auth is NOT enabled
-        return localStorage.getItem('face_auth_enabled') !== 'true';
+        // Always start as authenticated - facial recognition disabled
+        return true;
     });
 
     // Initialize from LocalStorage to prevent flash of UI
     const [isLockScreenVisible, setIsLockScreenVisible] = useState(() => {
-        const saved = localStorage.getItem('face_auth_enabled');
-        // If saved is 'true', we MUST start locked.
-        // If 'false' or null (default off), we start unlocked.
-        return saved === 'true';
+        // Lock screen disabled - facial recognition is off
+        return false;
     });
 
     // Local state for tracking settings, also init from local storage
     const [faceAuthEnabled, setFaceAuthEnabled] = useState(() => {
-        return localStorage.getItem('face_auth_enabled') === 'true';
+        // Facial recognition disabled
+        return false;
     });
 
 
@@ -136,6 +149,10 @@ function App() {
     const sourceRef = useRef(null);
     const animationFrameRef = useRef(null);
 
+    // Audio Playback with Continuous Buffering (smooth audio without glitches)
+    const audioBufferRef = useRef([]);
+    const audioPlaybackRef = useRef({ isPlaying: false, context: null, source: null, startTime: 0, offset: 0 });
+
     // Video Refs
     const videoRef = useRef(null);
     const canvasRef = useRef(null);
@@ -169,10 +186,92 @@ function App() {
         isHandTrackingEnabledRef.current = isHandTrackingEnabled;
         cursorSensitivityRef.current = cursorSensitivity;
         isCameraFlippedRef.current = isCameraFlipped;
-        console.log("[Ref Sync] Camera flipped ref updated to:", isCameraFlipped);
+        // Removed verbose logging
     }, [isModularMode, elementPositions, isHandTrackingEnabled, cursorSensitivity, isCameraFlipped]);
 
-    // Live Clock Update
+    // Audio Playback Loop - Continuous smooth playback with buffering
+    useEffect(() => {
+        let animFrameId = null;
+        let lastPlayTime = 0;
+        const PLAYBACK_INTERVAL = 50; // ms between playback attempts
+        
+        const playbackLoop = () => {
+            const now = performance.now();
+            
+            // Only check buffer every PLAYBACK_INTERVAL ms
+            if (now - lastPlayTime >= PLAYBACK_INTERVAL) {
+                lastPlayTime = now;
+                
+                // If buffer has chunks, play them
+                if (audioBufferRef.current.length > 0) {
+                    try {
+                        // Initialize audio context if needed
+                        let ctx = audioPlaybackRef.current.context;
+                        if (!ctx) {
+                            ctx = audioContextRef.current || new (window.AudioContext || window.webkitAudioContext)();
+                            audioContextRef.current = ctx;
+                            audioPlaybackRef.current.context = ctx;
+                        }
+
+                        if (ctx.state === 'suspended') {
+                            ctx.resume().catch(err => console.warn('AudioContext resume failed', err));
+                        }
+
+                        // Get buffered chunks (take small batches for responsiveness)
+                        const chunkCount = Math.min(audioBufferRef.current.length, 2);
+                        const chunksToPlay = audioBufferRef.current.splice(0, chunkCount);
+                        
+                        if (chunksToPlay.length === 0) {
+                            animFrameId = requestAnimationFrame(playbackLoop);
+                            return;
+                        }
+
+                        // Combine chunks into single PCM stream
+                        let totalSamples = 0;
+                        chunksToPlay.forEach(chunk => {
+                            totalSamples += chunk.length;
+                        });
+
+                        const float32Data = new Float32Array(totalSamples);
+                        let sampleOffset = 0;
+
+                        chunksToPlay.forEach(chunk => {
+                            const uint8 = new Uint8Array(chunk);
+                            const int16 = new Int16Array(uint8.buffer);
+                            
+                            for (let i = 0; i < int16.length; i++) {
+                                // Normalize int16 to float32 [-1, 1]
+                                float32Data[sampleOffset + i] = Math.max(-1, Math.min(1, int16[i] / 32768));
+                            }
+                            sampleOffset += int16.length;
+                        });
+
+                        // Create audio buffer at correct sample rate
+                        const sampleRate = 24000;
+                        const audioBuffer = ctx.createBuffer(1, float32Data.length, sampleRate);
+                        audioBuffer.copyToChannel(float32Data, 0, 0);
+
+                        // Play immediately
+                        const source = ctx.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(ctx.destination);
+                        source.start(0);
+
+                    } catch (err) {
+                        console.warn('Erro ao reproduzir áudio:', err);
+                    }
+                }
+            }
+            
+            animFrameId = requestAnimationFrame(playbackLoop);
+        };
+
+        animFrameId = requestAnimationFrame(playbackLoop);
+
+        return () => {
+            if (animFrameId) cancelAnimationFrame(animFrameId);
+        };
+    }, []);
     useEffect(() => {
         const timer = setInterval(() => {
             setCurrentTime(new Date());
@@ -337,34 +436,27 @@ function App() {
         });
         socket.on('audio_data', (data) => {
             setAiAudioData(data.data);
+            // Buffer audio chunk for continuous playback
+            audioBufferRef.current.push(data.data);
         });
         socket.on('auth_status', (data) => {
-            console.log("Auth Status:", data);
+            // Debug: Auth Status received
             setIsAuthenticated(data.authenticated);
-            if (data.authenticated) {
-                // If authenticated, hide lock screen with animation (handled by component if visible)
-                // But simpler: just hide it
-                // Actually, wait for animation if it WAS visible.
-                // For now, let's just assume if authenticated -> hide
-                // But we want the component to invoke onAnimationComplete.
-                // If we are starting up (and face auth disabled), we want it FALSE immediately.
-                if (!isLockScreenVisible) {
-                    // Do nothing, already hidden
-                }
-            } else {
-                // If NOT authenticated, show lock screen
-                setIsLockScreenVisible(true);
+            // Lock screen is disabled - always keep it hidden
+            if (!data.authenticated) {
+                // Even if not authenticated, don't show lock screen
+                setIsLockScreenVisible(false);
             }
         });
 
         socket.on('settings', (settings) => {
-            console.log("[Settings] Received:", settings);
+            // Debug: Settings received
             if (settings && typeof settings.face_auth_enabled !== 'undefined') {
                 setFaceAuthEnabled(settings.face_auth_enabled);
                 localStorage.setItem('face_auth_enabled', settings.face_auth_enabled);
             }
             if (typeof settings.camera_flipped !== 'undefined') {
-                console.log("[Settings] Camera flip set to:", settings.camera_flipped);
+                // Debug: Camera flip option received
                 setIsCameraFlipped(settings.camera_flipped);
             }
         });
@@ -422,20 +514,21 @@ function App() {
             setCadThoughts(prev => prev + data.text);
         });
         socket.on('browser_frame', (data) => {
-            setBrowserData(prev => ({
-                image: data.image,
-                logs: [...prev.logs, data.log].filter(l => l).slice(-50) // Keep last 50 logs
-            }));
-            setShowBrowserWindow(true);
+            // DISABLED: Web Agent View - Browser opens directly in Chrome now
+            // setBrowserData(prev => ({
+            //     image: data.image,
+            //     logs: [...prev.logs, data.log].filter(l => l).slice(-50) // Keep last 50 logs
+            // }));
+            // setShowBrowserWindow(true);
             // Auto-show browser window if hidden, clamped to viewport
-            if (!elementPositions.browser) {
-                const size = { w: 550, h: 380 };
-                const clamped = clampToViewport({ x: window.innerWidth / 2 - 200, y: window.innerHeight / 2 }, size);
-                setElementPositions(prev => ({
-                    ...prev,
-                    browser: clamped
-                }));
-            }
+            // if (!elementPositions.browser) {
+            //     const size = { w: 550, h: 380 };
+            //     const clamped = clampToViewport({ x: window.innerWidth / 2 - 200, y: window.innerHeight / 2 }, size);
+            //     setElementPositions(prev => ({
+            //         ...prev,
+            //         browser: clamped
+            //     }));
+            // }
         });
 
         // Handle streaming transcription
@@ -540,8 +633,6 @@ function App() {
             }
         });
 
-
-
         // Get All Media Devices (Microphones, Speakers, Webcams)
         navigator.mediaDevices.enumerateDevices().then(devs => {
             const audioInputs = devs.filter(d => d.kind === 'audioinput');
@@ -579,43 +670,9 @@ function App() {
 
         // Initialize Hand Landmarker
         const initHandLandmarker = async () => {
-            try {
-                console.log("Initializing HandLandmarker...");
-
-                // 1. Verify Model File
-                console.log("Fetching model file...");
-                const response = await fetch('/hand_landmarker.task');
-                if (!response.ok) {
-                    throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
-                }
-                console.log("Model file found:", response.headers.get('content-type'), response.headers.get('content-length'));
-
-                // 2. Initialize Vision
-                console.log("Initializing FilesetResolver...");
-                const vision = await FilesetResolver.forVisionTasks(
-                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
-                );
-                console.log("FilesetResolver initialized.");
-
-                // 3. Create Landmarker
-                console.log("Creating HandLandmarker (GPU)...");
-                handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-                    baseOptions: {
-                        modelAssetPath: `/hand_landmarker.task`,
-                        delegate: "GPU" // Enable GPU acceleration
-                    },
-                    runningMode: "VIDEO",
-                    numHands: 1
-                });
-                console.log("HandLandmarker initialized successfully!");
-                addMessage('System', 'Hand Tracking Ready');
-
-            } catch (error) {
-                console.error("Failed to initialize HandLandmarker:", error);
-                addMessage('System', `Hand Tracking Error: ${error.message}`);
-            }
+            // Hand tracking disabled to free up resources (conflicts with audio processing)
         };
-        initHandLandmarker();
+        // initHandLandmarker(); // DISABLED
 
         return () => {
             socket.off('connect');
@@ -651,21 +708,18 @@ function App() {
     useEffect(() => {
         if (selectedMicId) {
             localStorage.setItem('selectedMicId', selectedMicId);
-            console.log('[Settings] Saved microphone:', selectedMicId);
         }
     }, [selectedMicId]);
 
     useEffect(() => {
         if (selectedSpeakerId) {
             localStorage.setItem('selectedSpeakerId', selectedSpeakerId);
-            console.log('[Settings] Saved speaker:', selectedSpeakerId);
         }
     }, [selectedSpeakerId]);
 
     useEffect(() => {
         if (selectedWebcamId) {
             localStorage.setItem('selectedWebcamId', selectedWebcamId);
-            console.log('[Settings] Saved webcam:', selectedWebcamId);
         }
     }, [selectedWebcamId]);
 
@@ -737,13 +791,11 @@ function App() {
                 transmissionCanvasRef.current = document.createElement('canvas');
                 transmissionCanvasRef.current.width = 640;
                 transmissionCanvasRef.current.height = 360;
-                console.log("Initialized transmission canvas (640x360)");
             }
 
             setIsVideoOn(true);
             isVideoOnRef.current = true; // Update ref for loop
 
-            console.log("Starting video loop with webcam:", selectedWebcamId || "default");
             requestAnimationFrame(predictWebcam);
 
         } catch (err) {
@@ -798,9 +850,10 @@ function App() {
             }
         }
 
-
-        // 3. Hand Tracking
+        // 3. Hand Tracking - DISABLED
         let startTimeMs = performance.now();
+        // Hand tracking disabled - comentado para liberar recursos de áudio
+        /*
         // Use Ref for toggle check
         if (isHandTrackingEnabledRef.current && handLandmarkerRef.current && videoRef.current.currentTime !== lastVideoTimeRef.current) {
             lastVideoTimeRef.current = videoRef.current.currentTime;
@@ -1018,6 +1071,7 @@ function App() {
             }
 
         }
+        */
 
         // 4. FPS Calculation
         const now = performance.now();
@@ -1034,6 +1088,8 @@ function App() {
     };
 
     const drawSkeleton = (ctx, landmarks) => {
+        // DISABLED - Hand tracking disabled
+        /*
         ctx.strokeStyle = '#00FFFF';
         ctx.lineWidth = 2;
 
@@ -1047,6 +1103,7 @@ function App() {
             ctx.lineTo(end.x * canvasRef.current.width, end.y * canvasRef.current.height);
             ctx.stroke();
         }
+        */
     };
 
     const stopVideo = () => {
@@ -1074,6 +1131,7 @@ function App() {
     const togglePower = () => {
         if (isConnected) {
             socket.emit('stop_audio');
+            audioBufferRef.current = []; // Clear audio buffer when stopping
             setIsConnected(false);
             setIsMuted(false); // Reset mute state
         } else {
@@ -1215,12 +1273,11 @@ function App() {
 
     // --- MOUSE DRAG HANDLERS ---
     const handleMouseDown = (e, id) => {
-        console.log(`[MouseDrag] MouseDown on ${id}`, { target: e.target.tagName });
+        // Debug: Mouse down event
 
         // Fixed elements that should never be draggable (even in modular mode)
         const fixedElements = ['visualizer', 'chat', 'video', 'tools'];
         if (fixedElements.includes(id)) {
-            console.log(`[MouseDrag] ${id} is a fixed element, not draggable`);
             return;
         }
 
@@ -1230,7 +1287,6 @@ function App() {
         // Prevent dragging if interacting with inputs, buttons, or canvas (for 3D controls)
         const tagName = e.target.tagName.toLowerCase();
         if (tagName === 'input' || tagName === 'button' || tagName === 'textarea' || tagName === 'canvas' || e.target.closest('button')) {
-            console.log("[MouseDrag] Interaction blocked by interactive element");
             return;
         }
 
@@ -1239,7 +1295,6 @@ function App() {
         if (!isDragHandle && !isModularModeRef.current) {
             // If not clicking a drag handle and modular mode is off, don't drag
             // This allows popup windows to have dedicated drag areas
-            console.log("[MouseDrag] Not a drag handle and modular mode off");
             return;
         }
 
@@ -1351,12 +1406,8 @@ function App() {
 
             {/* --- PREMIUM UI LAYER --- */}
 
-            {/* Logic: Show AuthLock if we are NOT authenticated AND (Lock Screen is visible OR Auth is Enabled) 
-                Actually, simpler: isLockScreenVisible is the source of truth for visibility.
-                We set isLockScreenVisible = true via socket if auth is required.
-             */}
-
-            {isLockScreenVisible && (
+            {/* AuthLock disabled - facial recognition is turned off */}
+            {false && (
                 <AuthLock
                     socket={socket}
                     onAuthenticated={() => setIsAuthenticated(true)}
@@ -1386,7 +1437,7 @@ function App() {
                 className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-gray-900 via-black to-black z-0 pointer-events-none"
                 style={{ opacity: 0.6 }}
             ></div>
-            <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20 z-0 pointer-events-none mix-blend-overlay"></div>
+            <div className="absolute inset-0 bg-[url('/noise.svg')] opacity-20 z-0 pointer-events-none mix-blend-overlay"></div>
 
             {/* Ambient Glow (Fixed: Static) */}
             <div
@@ -1465,7 +1516,7 @@ function App() {
                     }}
                     onMouseDown={(e) => handleMouseDown(e, 'visualizer')}
                 >
-                    <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
+                    <div className="absolute inset-0 bg-[url('/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
                     <div className="relative z-20">
                         <Visualizer
                             audioData={aiAudioData}
@@ -1492,7 +1543,7 @@ function App() {
                     `}
                     style={{ zIndex: 20 }}
                 >
-                    <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-5 pointer-events-none mix-blend-overlay"></div>
+                    <div className="absolute inset-0 bg-[url('/noise.svg')] opacity-5 pointer-events-none mix-blend-overlay"></div>
                     {/* Compact Display Container (1080p Source) */}
                     <div className="relative border border-cyan-500/30 rounded-lg overflow-hidden shadow-[0_0_20px_rgba(6,182,212,0.1)] w-80 aspect-video bg-black/80">
                         {/* Hidden Video Element (Source) */}
@@ -1577,8 +1628,9 @@ function App() {
                 )}
 
 
-                {/* Browser Window Overlay */}
-                {showBrowserWindow && (
+                {/* Browser Window Overlay - DISABLED */}
+                {/* Web search now opens directly in your default browser (Chrome, Edge, etc) */}
+                {/* showBrowserWindow && (
                     <div
                         id="browser"
                         className={`absolute flex flex-col transition-all duration-200 
@@ -1596,7 +1648,7 @@ function App() {
                         }}
                         onMouseDown={(e) => handleMouseDown(e, 'browser')}
                     >
-                        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
+                        <div className="absolute inset-0 bg-[url('/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
                         <div className="relative z-20 w-full h-full">
                             <BrowserWindow
                                 imageSrc={browserData.image}
@@ -1606,7 +1658,7 @@ function App() {
                             />
                         </div>
                     </div>
-                )}
+                ) */}
 
 
                 {/* Chat Module */}
